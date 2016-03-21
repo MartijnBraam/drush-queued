@@ -1,0 +1,10 @@
+[Unit]
+Description=Hosting queue daemon
+
+[Service]
+ExecStart=/usr/bin/python3 -m drushqueued --dburi mysql://a:b@localhost/theaegirdatabase
+User=aegir
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
