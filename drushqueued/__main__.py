@@ -14,7 +14,12 @@ parser.add_argument('--myconf', help="Mysql my.conf file with connection setting
 parser.add_argument('--loglevel', help="Set the output log level", choices=['debug', 'info', 'warning', 'error'],
                     default='warning')
 parser.add_argument('--interval', help="The interval in seconds to check for new tasks", type=int, default=1)
+parser.add_argument('--eventproxy', help="Set the url for a sse-proxy server to notify queue changes to the browser")
 args = parser.parse_args()
+
+# Import requirements for the eventproxy
+if 'eventproxy' in args:
+    import requests
 
 # Set up the logger
 if args.loglevel == 'debug':
@@ -79,7 +84,7 @@ while True:
             finally:
                 cursor.close()
 
-            if result and isinstance(list, result):
+            if result:
                 logging.info('New tasks')
                 nids = [row[0] for row in result]
                 for nid in nids:
@@ -89,6 +94,13 @@ while True:
                         logging.info('Task successful')
                     except subprocess.CalledProcessError:
                         logging.error('Executing task {} failed'.format(nid))
+                    if 'eventproxy' in args:
+                        message = {
+                            'type': 'event',
+                            'name': 'task-finished',
+                            'data': str(nid)
+                        }
+                        requests.post(args.eventproxy, json=message)
 
     except BrokenPipeError as e:
         logging.error(str(e))
