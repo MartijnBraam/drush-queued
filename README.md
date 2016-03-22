@@ -38,3 +38,12 @@ By default the script checks for new tasks every second. You can change it with 
 ```bash
 $ python3 drushqueued --database theaegirdatabase --interval 5
 ```
+
+## Event proxy
+
+This runner has support for [sse-proxy](https://github.com/MartijnBraam/sse-proxy) for sending notifications to the
+browser on task completion.
+
+```bash
+$ python3 drushqueued --database theaegirdatabase --eventproxy http://localhost:8088/broadcast/
+```
