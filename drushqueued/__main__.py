@@ -1,9 +1,11 @@
 import argparse
 import pymysql
 import urllib.parse
-from time import sleep
 import logging
 import subprocess
+import asyncio
+from aiohttp.web import Application, Response
+from aiohttp_sse import EventSourceResponse
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description="Drush queue runner")
@@ -15,10 +17,11 @@ parser.add_argument('--loglevel', help="Set the output log level", choices=['deb
                     default='warning')
 parser.add_argument('--interval', help="The interval in seconds to check for new tasks", type=int, default=1)
 parser.add_argument('--eventproxy', help="Set the url for a sse-proxy server to notify queue changes to the browser")
+parser.add_argument('--eventsource', help="Run an eventsource server on the specified port", type=int)
 args = parser.parse_args()
 
 # Import requirements for the eventproxy
-if 'eventproxy' in args:
+if args.eventproxy:
     import requests
 
 # Set up the logger
@@ -54,55 +57,110 @@ else:
     print("Specify --database or --dburi to use this tool")
     exit(1)
 
-# Start the main loop that reconnects the database
-while True:
-    logging.info('Connecting to database')
+# Define variable to hold all the eventsource sockets
+sockets = set()
+
+
+@asyncio.coroutine
+def drush_queue_runner(loop):
+    while True:
+        logging.info('Connecting to database')
+        try:
+            database = pymysql.connect(connect_timeout=10, **connect_options)
+            database.autocommit(True)
+        except Exception as e:
+            logging.error(str(e))
+            logging.error('retrying in 5 seconds')
+            yield from asyncio.sleep(5)
+            continue
+        logging.info('Connected')
+
+        try:
+            # Start the task loop
+            while True:
+                yield from asyncio.sleep(args.interval)
+                cursor = database.cursor()
+                try:
+                    cursor.execute('SELECT t.nid '
+                                   'FROM hosting_task AS t '
+                                   'INNER JOIN node AS n '
+                                   'ON t.vid = n.vid '
+                                   'WHERE t.task_status = 0 '
+                                   'GROUP BY t.rid '
+                                   'ORDER BY n.changed, n.nid ASC')
+                    result = cursor.fetchall()
+                finally:
+                    cursor.close()
+
+                if result:
+                    logging.info('New tasks')
+                    nids = [row[0] for row in result]
+                    for nid in nids:
+                        yield from asyncio.sleep(0.1)
+                        logging.info("Executing task {}".format(nid))
+                        try:
+                            proc = yield from asyncio.create_subprocess_exec('drush', '@hostmaster', 'hosting-task', str(nid),
+                                                                  loop=loop)
+                            yield from proc.wait()
+                            logging.info('Task successful')
+                        except subprocess.CalledProcessError:
+                            logging.error('Executing task {} failed'.format(nid))
+                        if args.eventproxy:
+                            message = {
+                                'type': 'event',
+                                'name': 'task-finished',
+                                'data': str(nid)
+                            }
+                            requests.post(args.eventproxy, json=message)
+                        if args.eventsource:
+                            broadcast_task_refresh(nid)
+
+        except BrokenPipeError as e:
+            logging.error(str(e))
+        except pymysql.OperationalError as e:
+            logging.error(str(e))
+
+
+def broadcast_task_refresh(nid):
+    global sockets
+    for eventsource_client in sockets:
+        eventsource_client.send(str(nid), event="task-finished")
+
+
+@asyncio.coroutine
+def eventsource(request):
+    response = EventSourceResponse()
+    response.start(request)
+
+    global sockets
+    sockets.add(response)
+    logging.debug('User joined eventsource. (now {} clients)'.format(len(sockets)))
+
     try:
-        database = pymysql.connect(connect_timeout=10, **connect_options)
-        database.autocommit(True)
+        yield from response.wait()
     except Exception as e:
-        logging.error(str(e))
-        logging.error('retrying in 5 seconds')
-        sleep(5)
-        continue
-    logging.info('Connected')
+        sockets.remove(response)
+        logging.debug("User left eventsource ({} clients left)".format(len(sockets)))
+        raise e
 
-    try:
-        # Start the task loop
-        while True:
-            sleep(args.interval)
-            cursor = database.cursor()
-            try:
-                cursor.execute('SELECT t.nid '
-                               'FROM hosting_task AS t '
-                               'INNER JOIN node AS n '
-                               'ON t.vid = n.vid '
-                               'WHERE t.task_status = 0 '
-                               'GROUP BY t.rid '
-                               'ORDER BY n.changed, n.nid ASC')
-                result = cursor.fetchall()
-            finally:
-                cursor.close()
+    return response
 
-            if result:
-                logging.info('New tasks')
-                nids = [row[0] for row in result]
-                for nid in nids:
-                    logging.info("Executing task {}".format(nid))
-                    try:
-                        subprocess.check_call(['drush', '@hostmaster', 'hosting-task', str(nid)])
-                        logging.info('Task successful')
-                    except subprocess.CalledProcessError:
-                        logging.error('Executing task {} failed'.format(nid))
-                    if 'eventproxy' in args:
-                        message = {
-                            'type': 'event',
-                            'name': 'task-finished',
-                            'data': str(nid)
-                        }
-                        requests.post(args.eventproxy, json=message)
 
-    except BrokenPipeError as e:
-        logging.error(str(e))
-    except pymysql.OperationalError as e:
-        logging.error(str(e))
+@asyncio.coroutine
+def webserver(loop):
+    app = Application(loop=loop)
+
+    app.router.add_route('GET', '/eventsource/', eventsource)
+
+    handler = app.make_handler()
+    srv = yield from loop.create_server(handler, '127.0.0.1', args.eventsource)
+    logging.info("Eventsource started at http://127.0.0.1:{}".format(args.eventsource))
+    return srv, handler
+
+
+loop = asyncio.get_event_loop()
+asyncio.async(drush_queue_runner(loop))
+if args.eventsource:
+    asyncio.async(webserver(loop))
+
+loop.run_forever()

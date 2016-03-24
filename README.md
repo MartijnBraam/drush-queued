@@ -47,3 +47,11 @@ browser on task completion.
 ```bash
 $ python3 drushqueued --database theaegirdatabase --eventproxy http://localhost:8088/broadcast/
 ```
+
+## Event source
+
+This runner can also host a eventsource webserver. Use the `--eventsource` option to start the server and specify the port
+
+```bash
+$ python3 drushqueued --database theaegirdatabase --eventsource 8088
+```
