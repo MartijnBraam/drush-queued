@@ -101,6 +101,15 @@ def drush_queue_runner(loop):
                         try:
                             proc = yield from asyncio.create_subprocess_exec('drush', '@hostmaster', 'hosting-task', str(nid),
                                                                   loop=loop)
+                            if args.eventproxy:
+                                message = {
+                                    'type': 'event',
+                                    'name': 'task-start',
+                                    'data': str(nid)
+                                }
+                                requests.post(args.eventproxy, json=message)
+                            if args.eventsource:
+                                broadcast_task_start(nid)
                             yield from proc.wait()
                             logging.info('Task successful')
                         except subprocess.CalledProcessError:
@@ -125,6 +134,11 @@ def broadcast_task_refresh(nid):
     global sockets
     for eventsource_client in sockets:
         eventsource_client.send(str(nid), event="task-finished")
+
+def broadcast_task_start(nid):
+    global sockets
+    for eventsource_client in sockets:
+        eventsource_client.send(str(nid), event="task-start")
 
 
 @asyncio.coroutine
